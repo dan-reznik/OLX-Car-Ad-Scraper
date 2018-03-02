@@ -1,0 +1,394 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Load libraries
+
+```{r setup}
+library(magrittr)
+library(tidyverse)
+library(rvest)
+library(plotly)
+library(ggvis)
+library(glue)
+library(ggridges)
+```
+
+# Scraping
+
+Inspired by: https://www.analyticsvidhya.com/blog/2017/03/beginners-guide-on-web-scraping-in-r-using-rvest-with-hands-on-knowledge/
+
+Selector Gadget (Chrome extension): http://selectorgadget.com/
+
+```{r}
+get_html_pages <- function(urls) map(urls,read_html)
+```
+
+Civic, Corolla, Sentra, RJ, km < 80000, price < R$80000, year >= 2016, particular
+
+```{r}
+olxURL <- function(brand,model,page,maxPrice=80000,maxKm=80000) glue("http://rj.olx.com.br/veiculos-e-pecas/carros/{brand}/{model}?f=p&me={maxPrice}&o={page}&pe={maxKm}&rs=34")
+```
+
+Construct URLs
+
+```{r}
+urls <- map_chr(list(
+  list("honda","civic",1),
+  list("honda","civic",2),
+  list("toyota","corolla",1),
+  list("toyota","corolla",2),
+  list("toyota","corolla",3),
+  list("nissan","sentra",1),
+  list("nissan","sentra",2)),
+  ~do.call(olxURL,.x))
+
+# urls <- c("http://rj.olx.com.br/veiculos-e-pecas/carros/honda/civic?f=p&me=80000&pe=80000&rs=34"
+#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/toyota/corolla?f=p&me=80000&pe=80000&rs=34"
+#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/nissan/sentra?f=p&me=80000&pe=80000&rs=34"
+#           # 2nd page
+#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/honda/civic?f=p&me=80000&o=2&pe=80000&rs=34"
+#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/toyota/corolla?f=p&me=80000&o=2&pe=80000&rs=34"
+#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/nissan/sentra?f=p&me=80000&o=2&pe=80000&rs=34"
+#           # 3d page
+#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/toyota/corolla?f=p&me=80000&o=3&pe=80000&rs=34")
+```
+
+Get pages
+
+```{r}
+pages <- get_html_pages(urls)
+```
+
+Auxiliary functions
+
+```{r}
+get_html_href <- function(pages,css) unlist(map(pages,~(html_nodes(.x,css) %>% html_attr("href"))))
+
+get_html_text <- function(pages,css) {
+  text <- unlist(map(pages,~html_text(html_nodes(.x,css))))
+  text %>% str_trim("both")
+}
+```
+
+### Links
+
+```{r}
+text_links <- get_html_href(pages,".OLXad-list-link")
+text_links %>% head
+```
+
+### Car description
+
+```{r}
+text_titles <- get_html_text(pages,".OLXad-list-title")
+text_titles %>% head
+```
+
+## Preços
+
+```{r}
+convertReais <- function(s) s %>%
+  str_replace_all("[^\\d]+","") %>%
+  as.integer()
+```
+
+```{r}
+text_prices <- get_html_text(pages,".OLXad-list-price") %>%
+  convertReais(.)
+text_prices %>% head
+```
+
+### Km, câmbio, motor: vindo assim: "33.000 km\n\t\t | Câmbio: automático\n\t\t | Flex"
+
+```{r}
+clearMkCambioMotor <- function(s) 
+  c(s[1] %>% str_replace("\\.","") %>% str_replace(" [kK]m",""),
+    s[2] %>% str_replace("Câmbio: ",""),
+    s[3])
+
+decodeKmCambioMotor <- function(s) s %>%
+  str_replace_all("[\\n\\t]","") %>%
+  str_split("\\|") %>%
+  map(~str_trim(.x,"both")) %>%
+  map(~clearMkCambioMotor(.x))
+```
+
+```{r}
+text_km <- get_html_text(pages,".detail-specific") %>%
+  decodeKmCambioMotor(.)
+text_km %>% head
+```
+
+### Region
+
+```{r}
+text_region <- get_html_text(pages,".detail-region") %>%
+  str_replace_all("[\\s\\n\\t]+"," ")
+text_region %>% head
+```
+
+
+
+# Montagem do DF
+
+```{r}
+detectBrand <- function(s) case_when(str_detect(s,"corolla")~"corolla",
+                                     str_detect(s,"sentra")~"sentra",
+                                     str_detect(s,"civic")~"civic",
+                                     T~NA_character_)
+```
+
+
+```{r}
+df <- data_frame(title=str_sub(text_titles,end=-7),
+                 brand=as.factor(detectBrand(str_to_lower(title))),
+                 region=str_replace(text_region," - DDD \\d\\d",""),
+                 ddd=str_sub(text_region,start=-2),
+                 year=text_titles %>% str_sub(start=-4) %>% as.integer() %>% as.factor(),
+                 price1k=round(text_prices/1000,1),
+                 km1k=round(as.integer(map_chr(text_km,1))/1000,1),
+                 cambio=as.factor(map_chr(text_km,2)),
+                 motor=as.factor(map_chr(text_km,3)),
+                 link=text_links) %T>%
+  print
+```
+
+# Sentiment Analysis
+
+Recursively get car description from linked page
+
+```{r}
+# this will hit the server many times, use sparingly
+pages_descr <- get_html_pages(df$link)
+```
+
+
+https://github.com/hadley/rvest/issues/175
+
+```{r}
+#function definition
+html_text_collapse <- function(x, trim = FALSE, collapse = "\n"){
+  UseMethod("html_text_collapse")
+}
+
+html_text_collapse.xml_nodeset <- function(x, trim = FALSE, collapse = "\n"){
+  vapply(x, html_text_collapse.xml_node, character(1), trim = trim, collapse = collapse)
+}
+
+html_text_collapse.xml_node <- function(x, trim = FALSE, collapse = "\n"){
+  paste(xml2::xml_find_all(x, ".//text()"), collapse = collapse)
+}
+```
+
+Usando workaround do "html_text_collapse" pois html_text estava comendo os <br> tags:
+
+```{r}
+html_nodes(pages_descr[[244]],".OLXad-description") %>% html_text_collapse %>% str_sub(end=400)
+```
+
+Versão do get_html_text com o workaround para inserir "\n" nos <br>
+
+```{r}
+get_html_text_collapse <- function(pages,css) {
+  text <- unlist(map(pages,~html_text_collapse(html_nodes(.x,css))))
+  text %>% str_trim("both")
+}
+```
+
+Montando novo DF com descrcições (seguindo link do anuncio), limpeza
+
+```{r}
+df_descr <- df %>% mutate(descr=unlist(get_html_text_collapse(pages_descr,".OLXad-description")),
+                          model=unlist(get_html_text(pages_descr,".model")))
+df_descr_clean <- df_descr %>%
+  mutate(key=row_number(),
+         descr=descr %>% str_to_lower() %>% str_replace_all("[^[:alnum:]/]"," ") %>%
+           str_replace_all("\\s{2,}"," "),
+         model=str_replace(model,"Modelo:[\\n\\t]+",""))
+
+```
+
+Reporta preço mediano e N por modelo. Parece q modelos são padronizados tipo FIPE
+
+```{r}
+df_descr_clean %>%
+  group_by(model) %>%
+  summarize(price1k_median=median(price1k),N=n()) %>%
+  arrange(desc(price1k_median))
+```
+
+Para cada carro (identificado por "key"), liste as palavras usadas na descrição.
+
+```{r}
+df_descr_words <- df_descr_clean %>%
+  select(key,descr) %>%
+  mutate(word=str_split(descr,"\\s+")) %>%
+  select(-descr) %>%
+  unnest() %>%
+  filter(str_length(word)>2,
+         !str_detect(word,"\\d"))
+```
+
+Estudo frequencial das palavras
+
+```{r}
+df_descr_words_counted <- df_descr_words %>%
+  count(word,sort=T) %T>% print
+```
+
+Salvamos em excel para manualmente marcarmos palavras com sentimento negativo
+
+```{r}
+df_descr_words_counted %>%
+  as.data.frame() %>%
+  xlsx::write.xlsx("df_descr_words_counted.xls", row.names=F)
+```
+
+Le arquivo com palavras com sentimento negativo
+
+```{r}
+df_tretas <- read_csv("suspicious words.csv") %T>% print
+```
+
+Acha anuncios q contem palavra negativa
+
+```{r}
+df_descr_words_negative <- df_descr_words %>%
+  semi_join(df_tretas,by="word") %>%
+  group_by(key) %>%
+  summarize(negativity_count=n(),
+            bad_words=paste0(word,collapse=",")) %T>% 
+  print
+```
+
+Expande df de anúncios com análise de sentimento
+
+```{r}
+df_descr_clean_sentiment <- df_descr_clean %>%
+  left_join(df_descr_words_negative,by="key") %>%
+  mutate(negativity_count=if_else(is.na(negativity_count),0L,negativity_count)) %>%
+  arrange(desc(negativity_count)) %T>%
+  print
+```
+
+
+
+
+# Plots
+
+
+```{r}
+df_filt <- df_descr_clean_sentiment %>%
+  filter(price1k>40,!is.na(brand),year==2016) %>%
+  mutate(tooltip=glue("<a href={link}>{title}\n{region}\n</a>"))
+```
+
+```{r}
+df_filt %>%
+  ggplot(aes(x=negativity_count)) +
+  geom_bar(stat="count")
+```
+
+
+
+```{r}
+fun_length_y <- function(x) data.frame(y=median(x),label= paste0("N=", length(x)))
+
+df_filt %>%
+  mutate(brand=fct_reorder(brand,price1k,.desc=T),
+         suspicious=negativity_count>1) %>%
+  arrange(suspicious) %>% # so true is drawn last
+  #mutate(suspicious=as.factor(suspicious) %>% fct_inorder() %>% fct_rev()) %>%
+  ggplot(aes(x=brand,y=price1k,fill=brand)) +
+  #geom_violin(alpha=.25) +
+  geom_boxplot(notch = T, show.legend = F) +
+  scale_fill_discrete(guide = "none") +
+  stat_summary(fun.data = fun_length_y,
+               geom = "text", vjust = .5,hjust=2.5, size = 4) +
+  geom_jitter(aes(color=suspicious,shape=suspicious),alpha=.5,width=.1,size=3) +
+  scale_shape_manual(values=c(16,17)) +
+  scale_colour_manual(values = c("gray","red")) +
+  theme_bw() +
+  ggtitle("Civic, Corolla, Sentra, RJ, particular",
+          subtitle="km < 80k, price < R$80k, year >= 2016") # +
+  #theme(legend.position = "none")
+```
+
+```{r}
+df_filt_medians <- df_filt %>%
+  group_by(brand) %>%
+  summarize(N=n(),
+            price1k_median=median(price1k),
+            price1k_mean=mean(price1k)) %>%
+  arrange(desc(price1k_median)) %>%
+  mutate(y=row_number())
+  
+
+df_filt %>%
+  mutate(brand=fct_reorder(brand,price1k,.desc=T)) %>%
+  ggplot(aes(price1k, brand,fill=brand)) +
+  geom_density_ridges() +
+  geom_text(aes(x=90,y=y+.2,label=sprintf("N=%d",N)),
+            data=df_filt_medians) +
+  geom_segment(aes(x=price1k_median,y=y-.1,xend=price1k_median,yend=y+.1),
+            data=df_filt_medians,color="blue",size=2) +
+  geom_text(aes(x=price1k_median,y=y+.2,label=sprintf("med=%.1f",price1k_median)),
+            data=df_filt_medians,color="blue") +
+  geom_segment(aes(x=price1k_mean,y=y-.1,xend=price1k_mean,yend=y+.1),
+               data=df_filt_medians,color="red",size=2) +
+  geom_text(aes(x=price1k_mean,y=y-.2,label=sprintf("avg=%.1f",price1k_mean)),
+            data=df_filt_medians,color="red") +
+  theme_ridges()
+```
+
+
+Plota preço vs km
+
+```{r}
+df_filt %>%
+  mutate(suspicious=negativity_count>4) %>%
+  ggplot(aes(km1k,price1k,color=brand,group=brand)) +
+  geom_point(aes(shape=suspicious,size=suspicious)) +
+  geom_smooth() +
+  theme_bw() +
+  ggtitle("Civic, Corolla, Sentra, RJ, particular",
+          subtitle="km < 80k, price < R$80k, year >= 2016")
+```
+
+attempt: ggvis (tooltips seems buggy, cannot yet add title)
+
+```{r}
+df_filt %>%
+  ggvis(~km1k, ~price1k, fill=~brand) %>%
+  group_by(brand) %>%
+  layer_points() %>%
+  # hangs
+  # add_tooltip(function(df) "hello",on="click") %>%
+  layer_smooths(stroke=~brand) 
+```
+
+Using plotly
+
+```{r}
+df_filt %>%
+  group_by(brand) %>%
+  mutate(fit = fitted(loess(price1k ~ km1k))) %>%
+  plot_ly(x = ~km1k, text=~tooltip) %>%
+  #plot_ly(x = ~km1k, y = ~price1k, group=~brand,
+  # Hover text:
+  #text = ~paste(title), color = ~brand, marker=list(size=10)) %>%
+  add_markers(y = ~price1k, color = ~brand, marker=list(size=10)) %>%
+  #add_lines(name = "spline", line = list(shape = "spline")) %>%
+  add_lines(y = ~fit, color = ~brand, showlegend=F) %>%
+  layout(xaxis = list(showline=T))#%>%
+  # add_ribbons(data=broom::augment(m),
+  #             ymin = ~.fitted - 1.96 * .se.fit,
+  #             ymax = ~.fitted + 1.96 * .se.fit,
+  #             line = list(color = ~brand),
+  #             fillcolor = ~brand)
+```
+
+
+
