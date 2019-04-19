@@ -1,0 +1,66 @@
+---
+title: "OLX DB Azure"
+output: html_notebook
+---
+
+# Database Azure
+
+Em dbConnect (embaixo), no parametro driver, usar o name desta tabela.
+
+```{r}
+library(DBI)
+library(odbc)
+odbc::odbcListDrivers()
+```
+
+                 
+```{r}
+db_carros <- dbConnect(odbc(),
+                       driver = "ODBC Driver 17 for SQL Server",
+                       #driver = "SQL Server Native Client 11.0"
+                       #driver = "SQL Server",
+                       server = "groundhog.database.windows.net",
+                       database = "carros",
+                       uid = "dreznik@groundhog",
+                       pwd = rstudioapi::askForPassword()
+                       ,encoding = "UTF-8"
+                       )
+# dbDisconnect(db_carros)
+```
+
+```{r}
+df_temp <- advert_df_pp_clean_sentiment %>%
+               mutate(descr = descr %>%
+                        str_replace_all("[\\d/]+ ?","") %>%
+                        str_replace_all(" [:alpha:](?= )"," ")) %>%
+  select(-pages_descr)
+                      
+dbWriteTable(db_carros,"carros_test", df_temp,
+             overwrite=T,
+             field.types = c(descr="varchar(max)"))
+rm(df_temp)
+```
+
+
+```{sql,connection=db_carros}
+/****** Script for SelectTopNRows command from SSMS  ******/
+select len(descr) from carros_test
+```
+
+```{sql,connection=db_carros,output.var=countBrands}
+/****** Script for SelectTopNRows command from SSMS  ******/
+select model,count(*) cnt from carros_test
+group by model
+order by count(*) desc
+```
+
+```{r}
+countBrands %>%
+  mutate(model=model%>%fct_reorder(cnt)) %>% 
+  ggplot(aes(model,cnt,fill=model)) +
+  geom_col() +
+  theme(legend.position = "none") +
+  ggtitle("Car Ad Count in RJ",
+          subtitle="yr = 2016, miles < 80k, price < 80k") +
+  coord_flip()
+```

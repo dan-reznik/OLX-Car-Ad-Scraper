@@ -1,230 +1,282 @@
 ---
-title: "R Notebook"
-output:
+title: "OLX Car Price Scraper"
+author: Dan S. Reznik
+date: Abril, 2019
+output: 
   html_document:
+    mathjax: null
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    theme: united
     df_print: paged
+    highlight: tango
 ---
 
-# Load libraries
+```{r,echo=F}
+knitr::opts_chunk$set(
+  cache=T,
+  collapse=T,
+  comment="#>",
+  dpi=96,
+  out.width='100%'
+)
+```
 
-```{r setup}
+### Load libraries
+
+```{r message=F}
 library(magrittr)
 library(tidyverse)
 library(rvest)
-library(plotly)
 library(ggvis)
 library(glue)
 library(ggridges)
+library(xlsx)
+library(fs)
+library(tictoc)
+source("olx_scraper_utils.R")
 ```
 
-# Scraping
-
-Inspired by: https://www.analyticsvidhya.com/blog/2017/03/beginners-guide-on-web-scraping-in-r-using-rvest-with-hands-on-knowledge/
-
-Selector Gadget (Chrome extension): http://selectorgadget.com/
+To refresh scrape must delete both .rds below from disk
 
 ```{r}
-get_html_pages <- function(urls) map(urls,read_html)
+fname_advert <- "advert_df_pp.rds"
+advert_exists <- file_exists(fname_advert)
 ```
 
-Civic, Corolla, Sentra, RJ, km < 80000, price < R$80000, year >= 2016, particular
+## Scraping
+
+Inspired by this [article](https://www.analyticsvidhya.com/blog/2017/03/beginners-guide-on-web-scraping-in-r-using-rvest-with-hands-on-knowledge/)
+
+Construct DF with brand, model, pages, and subpages
 
 ```{r}
-olxURL <- function(brand,model,page,maxPrice=80000,maxKm=80000) glue("http://rj.olx.com.br/veiculos-e-pecas/carros/{brand}/{model}?f=p&me={maxPrice}&o={page}&pe={maxKm}&rs=34")
+urls_1_df <- tribble(
+  ~brand, ~model, 
+  "honda", "civic",
+  "toyota", "corolla",
+  "nissan", "sentra",
+  "vw-volkswagen", "jetta",
+  "renault", "fluence") %>%
+  mutate(url=olxURL(brand,model),
+         subpages=map(url, ~.x %>%
+                        read_html() %>%
+                        getPageNumbers))
 ```
 
-Construct URLs
+Cleans the "integer(0)" when there's only the 1st page, unnest to make a separate row for each subpage, and compute url's of subpages:
 
 ```{r}
-urls <- map_chr(list(
-  list("honda","civic",1),
-  list("honda","civic",2),
-  list("toyota","corolla",1),
-  list("toyota","corolla",2),
-  list("toyota","corolla",3),
-  list("nissan","sentra",1),
-  list("nissan","sentra",2)),
-  ~do.call(olxURL,.x))
-
-# urls <- c("http://rj.olx.com.br/veiculos-e-pecas/carros/honda/civic?f=p&me=80000&pe=80000&rs=34"
-#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/toyota/corolla?f=p&me=80000&pe=80000&rs=34"
-#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/nissan/sentra?f=p&me=80000&pe=80000&rs=34"
-#           # 2nd page
-#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/honda/civic?f=p&me=80000&o=2&pe=80000&rs=34"
-#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/toyota/corolla?f=p&me=80000&o=2&pe=80000&rs=34"
-#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/nissan/sentra?f=p&me=80000&o=2&pe=80000&rs=34"
-#           # 3d page
-#           ,"http://rj.olx.com.br/veiculos-e-pecas/carros/toyota/corolla?f=p&me=80000&o=3&pe=80000&rs=34")
+urls_complete <- urls_1_df %>%
+  mutate(subpages=map(subpages,
+                      ~(if(length(.x)==0) 1L else .x))) %>%             
+  unnest(subpages) %>%
+  mutate(url_subpage=olxURL_page(brand,model,subpages))
 ```
 
-Get pages
+Get pages, slow hits webserver
 
-```{r}
-pages <- get_html_pages(urls)
+```{r,message=F}
+tic()
+urls_complete %<>% mutate(page=get_html_pages(urls_complete$url_subpage))
+toc()
 ```
 
-Auxiliary functions
+### Build dataframe for links, title, prices for all ads
 
 ```{r}
-get_html_href <- function(pages,css) unlist(map(pages,~(html_nodes(.x,css) %>% html_attr("href"))))
+advert_df0 <- urls_complete %>%
+  mutate(link=get_html_href(page,".OLXad-list-link"),
+         title=get_html_text(page,".OLXad-list-title"),
+         price=get_html_text(page,".OLXad-list-price") %>% map(convertReais),
+         region=get_html_text(page,".detail-region") %>%
+           map(~str_replace_all(.x,"[\\s\\n\\t]+"," ")),
+         kcm=get_html_text(page,".detail-specific") %>%
+           map(decodeKmCambioMotor))
 
-get_html_text <- function(pages,css) {
-  text <- unlist(map(pages,~html_text(html_nodes(.x,css))))
-  text %>% str_trim("both")
-}
+# does this to adjust all list-columns to a max number of items
+# which is equal to the min of all link,title,prince,region,kcm
+max_items0 <- advert_df0%>%
+  select_if(is.list)%>%
+  map(~map_int(.x,length))%>%
+  as_tibble%>%
+  mutate(max_items=pmap_int(list(link,title,price,region,kcm),
+                            ~min(..1,..2,..3,..4,..5)))
+
+advert_df <- advert_df0 %>%
+  mutate_at(vars(link,title,price,region,kcm),
+            ~map2(.,max_items0$max_items,~head(.x,.y))) %>%
+  unnest(link,title,price,region,kcm,.preserve=page) %>%
+  separate(kcm,into=c("km","cambio","motor"),"\\|",convert=T)
 ```
 
-### Links
+Post process advert_df                 
 
 ```{r}
-text_links <- get_html_href(pages,".OLXad-list-link")
-text_links %>% head
+advert_df_pp <- advert_df %>%
+  transmute(brand=as.factor(brand), model=as.factor(model),
+            year=title %>% str_sub(start=-4) %>% as.integer() %>% as.factor(),
+            title=str_sub(title,end=-7),
+            ddd=str_sub(region,start=-2),
+            region=str_replace(region," - DDD \\d\\d",""),
+            price1k=round(price/1000,1),
+            km1k=round(km/1000,1),
+            cambio=as.factor(cambio),
+            motor=as.factor(motor),
+            link)
 ```
 
-### Car description
+Recursively get car description from linked page. Slow (hits webserver many times)
 
-```{r}
-text_titles <- get_html_text(pages,".OLXad-list-title")
-text_titles %>% head
+```{r,message=F}
+if(!advert_exists) advert_df_pp %<>%
+  mutate(pages_descr=get_html_pages(link))
 ```
 
-## Preços
+Montando novo DF com descrições (seguindo link do anuncio), note uso da função get_html_text_collapse() para não ignorar <br>:
 
 ```{r}
-convertReais <- function(s) s %>%
-  str_replace_all("[^\\d]+","") %>%
-  as.integer()
-```
-
-```{r}
-text_prices <- get_html_text(pages,".OLXad-list-price") %>%
-  convertReais(.)
-text_prices %>% head
-```
-
-### Km, câmbio, motor: vindo assim: "33.000 km\n\t\t | Câmbio: automático\n\t\t | Flex"
-
-```{r}
-clearMkCambioMotor <- function(s) 
-  c(s[1] %>% str_replace("\\.","") %>% str_replace(" [kK]m",""),
-    s[2] %>% str_replace("Câmbio: ",""),
-    s[3])
-
-decodeKmCambioMotor <- function(s) s %>%
-  str_replace_all("[\\n\\t]","") %>%
-  str_split("\\|") %>%
-  map(~str_trim(.x,"both")) %>%
-  map(~clearMkCambioMotor(.x))
+if(!advert_exists)
+  advert_df_pp %<>%
+  mutate(descr=unlist(get_html_text_collapse(pages_descr,
+                                             ".OLXad-description")),
+         model_descr=unlist(get_html_text(pages_descr,".model")))
 ```
 
 ```{r}
-text_km <- get_html_text(pages,".detail-specific") %>%
-  decodeKmCambioMotor(.)
-text_km %>% head
+if(!advert_exists)
+  write_rds(advert_df_pp,fname_advert,compress = "bz")
 ```
 
-### Region
+### Limpeza da descrição e modelo
+
+A partir daqui só precisa de advert_df_pp
 
 ```{r}
-text_region <- get_html_text(pages,".detail-region") %>%
-  str_replace_all("[\\s\\n\\t]+"," ")
-text_region %>% head
-```
-
-
-
-# Montagem do DF
-
-```{r}
-detectBrand <- function(s) case_when(str_detect(s,"corolla")~"corolla",
-                                     str_detect(s,"sentra")~"sentra",
-                                     str_detect(s,"civic")~"civic",
-                                     T~NA_character_)
+advert_df_pp <- read_rds(fname_advert)
 ```
 
 
 ```{r}
-df <- data_frame(title=str_sub(text_titles,end=-7),
-                 brand=as.factor(detectBrand(str_to_lower(title))),
-                 region=str_replace(text_region," - DDD \\d\\d",""),
-                 ddd=str_sub(text_region,start=-2),
-                 year=text_titles %>% str_sub(start=-4) %>% as.integer() %>% as.factor(),
-                 price1k=round(text_prices/1000,1),
-                 km1k=round(as.integer(map_chr(text_km,1))/1000,1),
-                 cambio=as.factor(map_chr(text_km,2)),
-                 motor=as.factor(map_chr(text_km,3)),
-                 link=text_links) %T>%
-  print
-```
-
-# Sentiment Analysis
-
-Recursively get car description from linked page
-
-```{r}
-# this will hit the server many times, use sparingly
-pages_descr <- get_html_pages(df$link)
-```
-
-
-https://github.com/hadley/rvest/issues/175
-
-```{r}
-#function definition
-html_text_collapse <- function(x, trim = FALSE, collapse = "\n"){
-  UseMethod("html_text_collapse")
-}
-
-html_text_collapse.xml_nodeset <- function(x, trim = FALSE, collapse = "\n"){
-  vapply(x, html_text_collapse.xml_node, character(1), trim = trim, collapse = collapse)
-}
-
-html_text_collapse.xml_node <- function(x, trim = FALSE, collapse = "\n"){
-  paste(xml2::xml_find_all(x, ".//text()"), collapse = collapse)
-}
-```
-
-Usando workaround do "html_text_collapse" pois html_text estava comendo os <br> tags:
-
-```{r}
-html_nodes(pages_descr[[244]],".OLXad-description") %>% html_text_collapse %>% str_sub(end=400)
-```
-
-Versão do get_html_text com o workaround para inserir "\n" nos <br>
-
-```{r}
-get_html_text_collapse <- function(pages,css) {
-  text <- unlist(map(pages,~html_text_collapse(html_nodes(.x,css))))
-  text %>% str_trim("both")
-}
-```
-
-Montando novo DF com descrcições (seguindo link do anuncio), limpeza
-
-```{r}
-df_descr <- df %>% mutate(descr=unlist(get_html_text_collapse(pages_descr,".OLXad-description")),
-                          model=unlist(get_html_text(pages_descr,".model")))
-df_descr_clean <- df_descr %>%
+advert_df_pp_clean <- advert_df_pp %>%
   mutate(key=row_number(),
          descr=descr %>% str_to_lower() %>% str_replace_all("[^[:alnum:]/]"," ") %>%
            str_replace_all("\\s{2,}"," "),
-         model=str_replace(model,"Modelo:[\\n\\t]+",""))
+         model_descr=str_replace(model_descr,"Modelo:[\\n\\t]+","") %>%
+           str_replace("AUTOM[AÁ]TICO","AUT.") %>%
+           str_replace("(SED.|SEDAN|UPPER) ","") %>%
+           str_replace("FLEX\\s?(START|FUEL|ONE)","FLEX"))
 
 ```
 
 Reporta preço mediano e N por modelo. Parece q modelos são padronizados tipo FIPE
 
 ```{r}
-df_descr_clean %>%
+advert_df_pp_clean_counts <- advert_df_pp_clean %>%
   group_by(model) %>%
-  summarize(price1k_median=median(price1k),N=n()) %>%
-  arrange(desc(price1k_median))
+  summarize(N=n(),price1k_median=median(price1k)) %>%
+  arrange(desc(price1k_median)) %>%
+  ungroup() %T>% print
 ```
+
+```{r}
+advert_df_pp_clean_counts <- advert_df_pp_clean %>%
+  #mutate(model=compressModel(model) %>% str_replace_all("\n"," ")) %>%
+  group_by(brand,model) %>%
+  summarize(N=n(),price1k_median=median(price1k)) %>%
+  arrange(desc(price1k_median)) %>%
+  ungroup() %T>% print
+```
+
+Modelos mais frequentes
+
+```{r}
+advert_df_pp_clean %>%
+  mutate(model = model %>% fct_infreq() %>% fct_lump(5)) %>%
+  ggplot(aes(x=model,fill=model)) +
+  #geom_bar(stat="count") +
+  geom_bar(aes(y = (..count..)/sum(..count..))) + 
+  scale_y_continuous(labels=scales::percent) +
+  labs(y="%",title="Modelos mais frequentes")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+```
+
+Mostrar seis modelos com mediana de preço mais alta
+
+```{r}
+fun_length_y <- function(x) data.frame(y=median(x),label= paste0("N=", length(x)))
+
+advert_df_pp_clean %>%
+  mutate(model = model %>% fct_lump(8) %>%
+           fct_reorder(price1k,.desc=T)) %>%
+  filter(model!="Other") %>%
+  ggplot(aes(x=model,y=price1k,fill=model)) +
+  #geom_bar(stat="count") +
+  geom_boxplot(width=.5,notch=T) +
+  stat_summary(fun.data = fun_length_y,
+               geom = "text", vjust = .5,hjust=-1, size = 3) +
+  geom_jitter(color="black",alpha=.1,width=.1,size=2) +
+  theme_bw() +
+  coord_cartesian(ylim=c(50,80)) +
+  labs(title="Modelos com mediana mais cara")+
+  theme(axis.text.x = element_text(angle = 30, hjust = 1),
+        legend.position = "none")
+```
+
+```{r}
+ggsave("most_expensive.png",width=10,height=5,units="in")
+```
+
+```{r message=F}
+advert_df_pp_clean %>%
+  filter(!is.na(km1k),!is.na(price1k)) %>%
+  filter(year==2016) %>%
+  ggplot(aes(x=km1k,y=price1k,color=model)) +
+  geom_point() +
+  geom_smooth(size=2) +
+  theme_bw()
+```
+
+```{r,message=F}
+advert_df_pp_clean %>%
+  filter(year==2016,!is.na(km1k),
+         model %in% c("civic","corolla","sentra")) %>%
+  mutate(km1k=km1k %>% cut_width(10,boundary=0)) %>%
+  group_by(model,km1k) %>%
+  summarize(price1k_mad=mad(price1k),
+            price1k=median(price1k) # must be 2nd as prev result needs it
+            ) %>%
+  ungroup() %>%
+  mutate(model=model%>%fct_reorder(price1k,.desc=T)) %>%
+  ggplot(aes(x=km1k,y=price1k)) +
+  geom_line(aes(group=model,color=model),size=2) +
+  geom_errorbar(aes(x=km1k,ymin=price1k-price1k_mad,ymax=price1k+price1k_mad,
+                    group=model,color=model),width = 0.25) +
+  geom_point(aes(color=model),alpha=.5) +
+  coord_cartesian(ylim=c(40,80)) +
+  theme_bw()
+```
+
+```{r}
+advert_df_pp_clean %>%
+  filter(year==2016,model %in% c("civic","corolla","sentra")) %>%
+  mutate(km1k_range=km1k %>% cut_width(10,boundary=0),
+         model=model%>%fct_reorder(price1k,.desc=T)) %>%
+  ggplot(aes(x=km1k_range,y=price1k)) +
+  geom_boxplot(aes(fill=model)) +
+  geom_point(aes(color=model),alpha=.25) +
+  coord_cartesian(ylim=c(40,80)) +
+  theme_bw()
+```
+
+## Sentiment Analysis
 
 Para cada carro (identificado por "key"), liste as palavras usadas na descrição.
 
 ```{r}
-df_descr_words <- df_descr_clean %>%
+advert_df_pp_words <- advert_df_pp_clean %>%
   select(key,descr) %>%
   mutate(word=str_split(descr,"\\s+")) %>%
   select(-descr) %>%
@@ -236,91 +288,88 @@ df_descr_words <- df_descr_clean %>%
 Estudo frequencial das palavras
 
 ```{r}
-df_descr_words_counted <- df_descr_words %>%
+advert_df_pp_words_counted <- advert_df_pp_words %>%
   count(word,sort=T) %T>% print
 ```
 
 Salvamos em excel para manualmente marcarmos palavras com sentimento negativo
 
 ```{r}
-df_descr_words_counted %>%
+advert_df_pp_words_counted %>%
   as.data.frame() %>%
-  xlsx::write.xlsx("df_descr_words_counted.xls", row.names=F)
+  write.xlsx("advert_df_pp_words_counted.xls", row.names=F)
 ```
 
 Le arquivo com palavras com sentimento negativo
 
-```{r}
-df_tretas <- read_csv("suspicious words.csv") %T>% print
+```{r,message=F}
+df_suspicious <- read_csv("suspicious words.csv") %T>% print
 ```
 
 Acha anuncios q contem palavra negativa
 
 ```{r}
-df_descr_words_negative <- df_descr_words %>%
-  semi_join(df_tretas,by="word") %>%
+advert_df_pp_words_negative <- advert_df_pp_words %>%
+  semi_join(df_suspicious,by="word") %>%
   group_by(key) %>%
   summarize(negativity_count=n(),
-            bad_words=paste0(word,collapse=",")) %T>% 
-  print
+            bad_words=paste0(word,collapse=","))
 ```
 
 Expande df de anúncios com análise de sentimento
 
 ```{r}
-df_descr_clean_sentiment <- df_descr_clean %>%
-  left_join(df_descr_words_negative,by="key") %>%
+advert_df_pp_clean_sentiment <- advert_df_pp_clean %>%
+  left_join(advert_df_pp_words_negative,by="key") %>%
   mutate(negativity_count=if_else(is.na(negativity_count),0L,negativity_count)) %>%
-  arrange(desc(negativity_count)) %T>%
-  print
+  arrange(desc(negativity_count))
+head(advert_df_pp_clean_sentiment,100)
 ```
 
-
-
-
-# Plots
-
+### Plots filtrados por sentimento non-suspicious
 
 ```{r}
-df_filt <- df_descr_clean_sentiment %>%
+df_filt <- advert_df_pp_clean_sentiment %>%
   filter(price1k>40,!is.na(brand),year==2016) %>%
   mutate(tooltip=glue("<a href={link}>{title}\n{region}\n</a>"))
 ```
 
+Histograma da contagem de palavras negativas por anúncio
+
 ```{r}
 df_filt %>%
-  ggplot(aes(x=negativity_count)) +
-  geom_bar(stat="count")
+  ggplot(aes(x=model,y=negativity_count+1,fill=model)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  ggtitle("Contagem de palavras negativas") +
+  theme(legend.position = "none")
 ```
 
-
-
 ```{r}
-fun_length_y <- function(x) data.frame(y=median(x),label= paste0("N=", length(x)))
-
 df_filt %>%
-  mutate(brand=fct_reorder(brand,price1k,.desc=T),
+  mutate(model=fct_reorder(model,price1k,.desc=T),
          suspicious=negativity_count>1) %>%
   arrange(suspicious) %>% # so true is drawn last
   #mutate(suspicious=as.factor(suspicious) %>% fct_inorder() %>% fct_rev()) %>%
-  ggplot(aes(x=brand,y=price1k,fill=brand)) +
+  ggplot(aes(x=model,y=price1k,fill=brand)) +
   #geom_violin(alpha=.25) +
   geom_boxplot(notch = T, show.legend = F) +
   scale_fill_discrete(guide = "none") +
   stat_summary(fun.data = fun_length_y,
-               geom = "text", vjust = .5,hjust=2.5, size = 4) +
+               geom = "text", vjust = 1,hjust=.5, size = 4) +
   geom_jitter(aes(color=suspicious,shape=suspicious),alpha=.5,width=.1,size=3) +
   scale_shape_manual(values=c(16,17)) +
   scale_colour_manual(values = c("gray","red")) +
   theme_bw() +
-  ggtitle("Civic, Corolla, Sentra, RJ, particular",
-          subtitle="km < 80k, price < R$80k, year >= 2016") # +
-  #theme(legend.position = "none")
+  ggtitle("Sedans \"Black\", RJ, particular",
+          subtitle="km < 80k, price < R$80k, year = 2016")
 ```
+
+Ridge plot dos preços dos 3 sedans
 
 ```{r}
 df_filt_medians <- df_filt %>%
-  group_by(brand) %>%
+  group_by(model) %>%
   summarize(N=n(),
             price1k_median=median(price1k),
             price1k_mean=mean(price1k)) %>%
@@ -329,9 +378,9 @@ df_filt_medians <- df_filt %>%
   
 
 df_filt %>%
-  mutate(brand=fct_reorder(brand,price1k,.desc=T)) %>%
-  ggplot(aes(price1k, brand,fill=brand)) +
-  geom_density_ridges() +
+  mutate(model=fct_reorder(model,price1k,.desc=T)) %>%
+  ggplot(aes(price1k, model,fill=model)) +
+  geom_density_ridges(alpha=.5) +
   geom_text(aes(x=90,y=y+.2,label=sprintf("N=%d",N)),
             data=df_filt_medians) +
   geom_segment(aes(x=price1k_median,y=y-.1,xend=price1k_median,yend=y+.1),
@@ -342,24 +391,27 @@ df_filt %>%
                data=df_filt_medians,color="red",size=2) +
   geom_text(aes(x=price1k_mean,y=y-.2,label=sprintf("avg=%.1f",price1k_mean)),
             data=df_filt_medians,color="red") +
-  theme_ridges()
+  theme_ridges() +
+  ggtitle("Sedans \"Black\", RJ, particular",
+          subtitle="km < 80k, price < R$80k, year = 2016") +
+  theme(legend.position = "none")
 ```
 
-
-Plota preço vs km
+Preço vs km
 
 ```{r}
 df_filt %>%
+  filter(!is.na(km1k),!is.na(price1k)) %>%
   mutate(suspicious=negativity_count>4) %>%
   ggplot(aes(km1k,price1k,color=brand,group=brand)) +
-  geom_point(aes(shape=suspicious,size=suspicious)) +
+  geom_point(aes(shape=suspicious),size=3) +
   geom_smooth() +
   theme_bw() +
-  ggtitle("Civic, Corolla, Sentra, RJ, particular",
+  ggtitle("Sedans Japonses, RJ, particular",
           subtitle="km < 80k, price < R$80k, year >= 2016")
 ```
 
-attempt: ggvis (tooltips seems buggy, cannot yet add title)
+Mesmo plot com ggvis (tooltips seems buggy, cannot yet add title)
 
 ```{r}
 df_filt %>%
@@ -371,26 +423,16 @@ df_filt %>%
   layer_smooths(stroke=~brand) 
 ```
 
-Using plotly
-
 ```{r}
-df_filt %>%
-  group_by(brand) %>%
-  mutate(fit = fitted(loess(price1k ~ km1k))) %>%
-  plot_ly(x = ~km1k, text=~tooltip) %>%
-  #plot_ly(x = ~km1k, y = ~price1k, group=~brand,
-  # Hover text:
-  #text = ~paste(title), color = ~brand, marker=list(size=10)) %>%
-  add_markers(y = ~price1k, color = ~brand, marker=list(size=10)) %>%
-  #add_lines(name = "spline", line = list(shape = "spline")) %>%
-  add_lines(y = ~fit, color = ~brand, showlegend=F) %>%
-  layout(xaxis = list(showline=T))#%>%
-  # add_ribbons(data=broom::augment(m),
-  #             ymin = ~.fitted - 1.96 * .se.fit,
-  #             ymax = ~.fitted + 1.96 * .se.fit,
-  #             line = list(color = ~brand),
-  #             fillcolor = ~brand)
+advert_df_pp_clean_sentiment %>%
+  mutate(model=model %>% fct_reorder(price1k,.desc=T)) %>% 
+  ggplot(aes(x=model,y=price1k,fill=model)) +
+  geom_boxplot() +
+  theme(legend.position = "none") +
+  ggtitle("Car Prices in RJ",
+          subtitle="yr = 2016, miles < 80k, price < 80k")
 ```
+
 
 
 
