@@ -1,11 +1,17 @@
-OLX Scraper: Car Priuces
+OLX Scraper: Car Prices
 ================
 
-This is an example of a scrape of the [OLX](olx.com.br) site in Brazil to compare used car prices for cars in the Imported Compact Sedan category (Corollas, Sentras, Jettas, etc).
+``` r
+knitr::include_graphics("pics/civic.jpg")
+```
 
-In the companion [website](https://dan-reznik.github.io/OLX-Car-Ad-Scraper/), you can see the scraping code, which produces the following results:
+<img src="pics/civic.jpg" width="50%" style="display: block; margin: auto;" />
 
-### Compare prices of main models
+We will scrape [OLX](olx.com.br) in Brazil to compare used car prices for cars in the imported compact sedan category (Corollas, Sentras, Jettas, etc).
+
+Refer to the companion [website](https://dan-reznik.github.io/OLX-Car-Ad-Scraper/) for low-level scraping code. Below the main results are shown:
+
+### Price comparison per model
 
 ``` r
 knitr::include_graphics("pics/compare all.png")
@@ -13,7 +19,7 @@ knitr::include_graphics("pics/compare all.png")
 
 <img src="pics/compare all.png" width="1344" />
 
-### Compare price change against mileage range (in km)
+### Price change against mileage range (in km)
 
 ``` r
 knitr::include_graphics("pics/price per mileage.png")
@@ -21,7 +27,7 @@ knitr::include_graphics("pics/price per mileage.png")
 
 <img src="pics/price per mileage.png" width="1344" />
 
-### Categorize certain messages as suspicious if they contain certain words
+### Show data points containing suspicious words (price is not reliable)
 
 ``` r
 knitr::include_graphics("pics/compare w sentiment.png")

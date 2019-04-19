@@ -1,25 +1,29 @@
 ---
-title: "OLX Scraper: Car Priuces"
+title: "OLX Scraper: Car Prices"
 output: github_document
 ---
 
-This is an example of a scrape of the [OLX](olx.com.br) site in Brazil to compare used car prices for cars in the Imported Compact Sedan category (Corollas, Sentras, Jettas, etc).
+```{r,out.width="50%",fig.align="center"}
+knitr::include_graphics("pics/civic.jpg")
+```
 
-In the companion [website](https://dan-reznik.github.io/OLX-Car-Ad-Scraper/), you can see the scraping code, which produces the following results:
+We will scrape [OLX](olx.com.br) in Brazil to compare used car prices for cars in the imported compact sedan category (Corollas, Sentras, Jettas, etc).
 
-### Compare prices of main models
+Refer to the companion [website](https://dan-reznik.github.io/OLX-Car-Ad-Scraper/) for low-level scraping code. Below the main results are shown:
+
+### Price comparison per model
 
 ```{r}
 knitr::include_graphics("pics/compare all.png")
 ```
 
-### Compare price change against mileage range (in km)
+### Price change against mileage range (in km)
 
 ```{r}
 knitr::include_graphics("pics/price per mileage.png")
 ```
 
-### Categorize certain messages as suspicious if they contain certain words
+### Show data points containing suspicious words (price is not reliable)
 
 ```{r}
 knitr::include_graphics("pics/compare w sentiment.png")
