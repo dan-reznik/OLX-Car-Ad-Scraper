@@ -11,6 +11,7 @@ output:
     theme: united
     df_print: paged
     highlight: tango
+    code_folding: show
 ---
 
 ```{r,echo=F}
